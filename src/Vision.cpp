@@ -16,7 +16,7 @@ void Vision::Update()
 	Width = Table->GetNumberArray("width", llvm::ArrayRef<double>());
 }
 
-/*void Vision::Filter()
+void Vision::Filter()
 {
 	int NumFound = 0;
 	int size = Y.size();
@@ -119,7 +119,7 @@ void Vision::Update()
 			}
 		}
 	}
-}*/
+}
 
 double Vision::GetArea(unsigned int val)
 {

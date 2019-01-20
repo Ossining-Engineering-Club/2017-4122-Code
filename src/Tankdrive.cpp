@@ -1,20 +1,35 @@
 #include "Tankdrive.h"
+#include "Constants.h"
+#include "WPILib.h"	//includes WPILib bibrary
+#include <math.h>
 
-Tankdrive::Tankdrive(unsigned int Left1C,unsigned int Left2C, unsigned int Left3C,
-		unsigned int Right1C, unsigned int Right2C, unsigned int Right3C)
-: Left1(Left1C), Left2(Left2C), Left3(Left3C), Right1(Right1C), Right2(Right2C), Right3(Right3C)
+Tankdrive::Tankdrive(unsigned int Leftchannel,unsigned int Rightchannel)
+: Left(Leftchannel), Right(Rightchannel),
+ LWEncoder(2,3,false,frc::Encoder::EncodingType::k4X),
+ RWEncoder(0,1,true,frc::Encoder::EncodingType::k4X),
+ Gyro(1),
+ Usonic(0),
+ vision()
 {
 	throttle = 0;
+	LWEncoder.SetDistancePerPulse(ENCODERCONST);		//Set distance per pulse so encoders read in Inches
+	RWEncoder.SetDistancePerPulse(ENCODERCONST);		//Set distance per pulse so encoders read in Inches
+
+	LWEncoder.Reset();
+	RWEncoder.Reset();
+	VisionX = 0;
+	VisionDifference = 0;
 }
 
 void Tankdrive::drive(float left, float right)
 {
-	Left1.Set(left*-1*throttle);
-	Left2.Set(left*-1*throttle);
-	Left3.Set(left*-1*throttle);
-	Right1.Set(right*throttle);
-	Right2.Set(right*throttle);
-	Right3.Set(right*throttle);
+	// Limit left and right inputs to between -1 and 1
+	if(left>1)left=1;
+	else if(left<-1)left=-1;
+	if(right>1)right=1;
+	else if(right<-1)right=-1;
+	Left.Set(left*throttle);
+	Right.Set(right*throttle*-1);
 }
 
 void Tankdrive::Throttle(float Ithrottle)
@@ -22,12 +37,161 @@ void Tankdrive::Throttle(float Ithrottle)
 	throttle = Ithrottle;
 }
 
-void Tankdrive::DirectDrive(float dleft, float dright)
+void Tankdrive::DirectDrive(float left, float right)
 {
-	Left1.Set(dleft);
-	Left2.Set(dleft);
-	Left3.Set(dleft);
-	Right1.Set(dright*-1);
-	Right2.Set(dright*-1);
-	Right3.Set(dright*-1);
+	// Limit left and right inputs to between -1 and 1
+	left *= LEFTMULT;
+	right *= (LEFTMULT - 2);
+	if(left>1)left=1;
+	else if(left<-1)left=-1;
+	if(right>1)right=1;
+	else if(right<-1)right=-1;
+	Left.Set(left);
+	Right.Set(right);
+}
+
+void Tankdrive::AutoDriveGyro(float distance, float speed) //Args are distance, speed
+{
+	if(speed>1)speed=1;
+	else if(speed<-1)speed=-1;
+	AutoTimer.Reset(); AutoTimer.Start();
+	LWEncoder.Reset();
+	RWEncoder.Reset();    //Reset Wheel Encoders
+	Gyro.Reset();
+	Tankdrive::DirectDrive(speed, speed);		//Drives both motors at standard length
+
+	while((((fabs(LWEncoder.GetDistance()) + fabs(RWEncoder.GetDistance())) / 2) < distance) && AutoTimer.Get()<=AUTOTIMEMAX)
+	{
+		Tankdrive::DirectDrive(speed+AUTOGYROCONST*Gyro.GetAngle(), speed-AUTOGYROCONST*Gyro.GetAngle());
+		Wait(0.001);
+	}
+	Tankdrive::drive(0.0,0.0);
+}
+
+void Tankdrive::AutoDriveGyroUS(float USrange, float speed, float Maxdistance) //Args are distance, speed
+{
+	for (int i = 0; i < 10; i++)
+		Usonic.GetSample();
+	bool USGood=1;
+	if(speed>1)speed=1;
+	else if(speed<-1)speed=-1;
+	AutoTimer.Reset(); AutoTimer.Start();
+	LWEncoder.Reset();
+	RWEncoder.Reset();    //Reset Wheel Encoders
+	Gyro.Reset();
+	Tankdrive::DirectDrive(speed, speed);		//Drives both motors at standard length
+
+	if (Usonic.GetRange() < 15) USGood=0;
+
+	while(((((fabs(LWEncoder.GetDistance()) + fabs(RWEncoder.GetDistance())) / 2) < Maxdistance)
+			&& (Usonic.GetRange() > USrange  || !USGood)) && AutoTimer.Get()<=AUTOTIMEMAX)
+	{
+		Tankdrive::DirectDrive(speed+AUTOGYROCONST*Gyro.GetAngle(), speed-AUTOGYROCONST*Gyro.GetAngle());
+		Usonic.GetSample();
+		Wait(TIMEPERIOD);
+	}
+	Tankdrive::drive(0.0,0.0);
+}
+
+void Tankdrive::AutoTurnGyro(float angle, float speed)	 //Args are angle, speed
+{
+	AutoTimer.Reset(); AutoTimer.Start();
+	LWEncoder.Reset();
+	RWEncoder.Reset();    //Reset Wheel Encoders
+	Gyro.Reset();
+	if(speed>1)speed=1;
+	else if(speed<-1)speed=-1;
+	if (angle > 0.0) Tankdrive::DirectDrive(-1.0*speed, speed);
+	else Tankdrive::DirectDrive(speed, -1.0*speed);
+
+	while (fabs(Gyro.GetAngle()) <= fabs(angle)  && AutoTimer.Get()<=AUTOTIMEMAX)	//When the gyroscope gives a reading below/equal to 45
+	{
+	    Wait(0.001);
+	}
+	Tankdrive::drive(0.0, 0.0);
+}
+
+int Tankdrive::AutoDriveVision(float USrange, float speed, float Maxdistance) //Args are distance, speed
+{
+	int returnC = 0;
+	float Sample, LastSample;  //Current Data Value and Previous data Value
+	float Integral;
+	float Derivative;
+	float Turn;
+	LastSample=0.0;
+	for (int i = 0; i < 10; i++)
+		Usonic.GetSample();
+	bool USGood=1;
+	if(speed>1)speed=1;
+	else if(speed<-1)speed=-1;
+	AutoTimer.Reset(); AutoTimer.Start();
+	LWEncoder.Reset();
+	RWEncoder.Reset();    //Reset Wheel Encoders
+
+	if (Usonic.GetRange() < 15) USGood=0;
+
+	while(((((fabs(LWEncoder.GetDistance()) + fabs(RWEncoder.GetDistance())) / 2) < Maxdistance)
+			&& (Usonic.GetRange() > USrange  || !USGood)) && AutoTimer.Get()<= (AUTOTIMEMAX + 1.0))
+	{
+		vision.Update();
+		if (vision.GetNumContours() != 0)
+		{
+			if (vision.GetNumContours() == 1) VisionX = vision.GetX(0);
+			else VisionX = (vision.GetX(0) + vision.GetX(1)) /2;
+			Sample = VisionX - 160;
+			Integral = Integral + (TIMEPERIOD/2)*(Sample+LastSample);
+		    Derivative = (Sample - LastSample)/TIMEPERIOD;
+		    // If Sample, Integral and Derivative are 0, then we want go with speed on each side
+		    // If Sample, Integral or Derivative are large positive, left drive = -1, right drive = 1
+		    // If Sample, Integral or Derivative are large negative, left drive = 1, right drive = -1
+		    // We would like the average of the two sides to be speed
+
+		    Turn = PCONSTANT * Sample + ICONSTANT * Integral + DCONSTANT * Derivative;
+			Tankdrive::DirectDrive(speed * (1 - Turn), speed * (1 + Turn));
+			LastSample=Sample;
+		}
+		else
+			Tankdrive::DirectDrive(speed,speed); //Needed to prevent crash
+		Usonic.GetSample();
+		Wait(TIMEPERIOD);
+	}
+	if (((fabs(LWEncoder.GetDistance()) + fabs(RWEncoder.GetDistance())) / 2) >= Maxdistance)
+		returnC = 1;
+	else if ((Usonic.GetRange() <= USrange ))
+		returnC = 2;
+	else if (AutoTimer.Get()>AUTOTIMEMAX)
+		returnC = 3;
+	Tankdrive::drive(0.0,0.0);
+	return returnC;
+}
+
+void Tankdrive::EncoderReset()
+{
+	LWEncoder.Reset();
+	RWEncoder.Reset();
+}
+
+double Tankdrive::GetUSRange()
+{
+	return Usonic.GetRange();
+}
+
+void Tankdrive::GetUSSample()
+{
+	Usonic.GetSample();
+}
+
+double Tankdrive::GetLEncoder()
+{
+	return LWEncoder.GetDistance();
+}
+
+double Tankdrive::GetREncoder()
+{
+	return RWEncoder.GetDistance();
+}
+
+double Tankdrive::GetGyro()
+{
+	return Gyro.GetAngle();
 }
